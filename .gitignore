@@ -1,0 +1,74 @@
+# Python bytecode and packaging
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+build/
+dist/
+
+# Virtual environments
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+venv/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.playwright-mcp/
+playwright-report/
+test-results/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Credentials and private keys
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+credentials.json
+secrets.json
+
+# vod-packager working and output directories
+.*.staging-*/
+.*.backup-*/
+output/
+outputs/
+
+# Local media inputs and generated streaming assets
+input/
+*.mp4
+*.m4s
+*.mpd
+*.m3u8
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.aac
+*.m4a

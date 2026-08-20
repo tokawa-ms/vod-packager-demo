@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vod-packager preview</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/plyr@3.8.4/dist/plyr.css">
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #111827;
+      color: #f9fafb;
+    }
+    main {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto minmax(170px, 29vh);
+      gap: clamp(6px, 1vh, 12px);
+      width: min(1200px, calc(100% - 24px));
+      height: 100dvh;
+      margin: 0 auto;
+      padding: clamp(10px, 2vh, 20px) 0;
+    }
+    h1 { margin: 0; font-size: clamp(1.15rem, 2.5vh, 1.75rem); }
+    .player {
+      min-height: 0;
+      overflow: hidden;
+      border-radius: 12px;
+      background: #000;
+    }
+    .player .plyr,
+    .player .plyr__video-wrapper {
+      width: 100%;
+      height: 100%;
+    }
+    .player video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    #status {
+      min-height: 1.25em;
+      margin: 0;
+      overflow: hidden;
+      color: #cbd5e1;
+      font-size: clamp(.8rem, 1.7vh, 1rem);
+      line-height: 1.25;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    code { color: #93c5fd; }
+    .telemetry {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 0;
+      padding: clamp(10px, 1.5vh, 16px);
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: #0f172a;
+    }
+    .telemetry-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    .telemetry h2 { margin: 0; font-size: clamp(.9rem, 1.8vh, 1.1rem); }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge {
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: #1e293b;
+      color: #cbd5e1;
+      font-size: clamp(.7rem, 1.5vh, .875rem);
+    }
+    .badge-auto { background: #075985; color: #e0f2fe; }
+    #bitrate-chart {
+      display: block;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      border-radius: 8px;
+      background: #111827;
+    }
+    .chart-note {
+      margin: 5px 0 0;
+      overflow: hidden;
+      color: #94a3b8;
+      font-size: clamp(.65rem, 1.3vh, .8rem);
+      line-height: 1.2;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    @media (max-height: 650px) {
+      main { grid-template-rows: auto minmax(0, 1fr) auto minmax(145px, 30vh); }
+      .telemetry { padding: 8px; }
+      .chart-note { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Multi-bitrate HLS preview</h1>
+    <div class="player">
+      <video id="player" controls playsinline crossorigin="anonymous"></video>
+    </div>
+    <p id="status" role="status">Loading <code>master.m3u8</code>...</p>
+    <section class="telemetry" aria-labelledby="chart-title">
+      <div class="telemetry-header">
+        <h2 id="chart-title">Selected bitrate timeline</h2>
+        <div class="badges">
+          <span id="abr-mode" class="badge badge-auto">ABR Auto</span>
+          <span id="current-rendition" class="badge">Waiting for playback</span>
+          <span id="buffer-depth" class="badge">Buffer: 0.0s</span>
+        </div>
+      </div>
+      <canvas
+        id="bitrate-chart"
+        role="img"
+        aria-label="Bitrate selected by hls.js over the video timeline"
+      ></canvas>
+      <p class="chart-note">
+        The cyan line is the bitrate actually selected by hls.js.
+        Horizontal guides show the available bitrate ladder.
+      </p>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.0/dist/hls.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/plyr@3.8.4/dist/plyr.min.js"></script>
+  <script>
+    (() => {
+      const video = document.querySelector('#player');
+      const status = document.querySelector('#status');
+      const abrMode = document.querySelector('#abr-mode');
+      const currentRendition = document.querySelector('#current-rendition');
+      const bufferDepth = document.querySelector('#buffer-depth');
+      const chart = document.querySelector('#bitrate-chart');
+      const chartContext = chart.getContext('2d');
+      const source = '/media/master.m3u8';
+      const samples = new Map();
+      let levels = [];
+      let activeLevel = null;
+
+      const setStatus = (message) => {
+        status.textContent = message;
+      };
+
+      const formatTime = (seconds) => {
+        const value = Math.max(0, Math.round(seconds));
+        return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
+      };
+
+      const resizeChart = () => {
+        const scale = window.devicePixelRatio || 1;
+        const bounds = chart.getBoundingClientRect();
+        const width = Math.max(320, Math.round(bounds.width));
+        const height = Math.max(200, Math.round(bounds.height));
+        if (chart.width !== width * scale || chart.height !== height * scale) {
+          chart.width = width * scale;
+          chart.height = height * scale;
+          chartContext.setTransform(scale, 0, 0, scale, 0, 0);
+        }
+        return { width, height };
+      };
+
+      const drawChart = () => {
+        const { width, height } = resizeChart();
+        const padding = { top: 18, right: 20, bottom: 34, left: 76 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+        const duration = Number.isFinite(video.duration) && video.duration > 0
+          ? video.duration
+          : 1;
+        const maxBitrate = Math.max(...levels.map((level) => level.bitrate), 1);
+        const x = (time) => padding.left + (time / duration) * plotWidth;
+        const y = (bitrate) => (
+          padding.top + plotHeight - (bitrate / maxBitrate) * plotHeight
+        );
+
+        chartContext.clearRect(0, 0, width, height);
+        chartContext.font = '12px system-ui, sans-serif';
+        chartContext.lineWidth = 1;
+
+        levels.forEach((level) => {
+          const lineY = y(level.bitrate);
+          chartContext.strokeStyle = '#334155';
+          chartContext.beginPath();
+          chartContext.moveTo(padding.left, lineY);
+          chartContext.lineTo(width - padding.right, lineY);
+          chartContext.stroke();
+          chartContext.fillStyle = '#94a3b8';
+          chartContext.textAlign = 'right';
+          chartContext.textBaseline = 'middle';
+          chartContext.fillText(
+            `${Math.round(level.bitrate / 1000)}k`,
+            padding.left - 8,
+            lineY,
+          );
+        });
+
+        for (let tick = 0; tick <= 4; tick += 1) {
+          const time = duration * tick / 4;
+          const tickX = x(time);
+          chartContext.strokeStyle = '#1e293b';
+          chartContext.beginPath();
+          chartContext.moveTo(tickX, padding.top);
+          chartContext.lineTo(tickX, padding.top + plotHeight);
+          chartContext.stroke();
+          chartContext.fillStyle = '#94a3b8';
+          chartContext.textAlign = 'center';
+          chartContext.textBaseline = 'top';
+          chartContext.fillText(
+            formatTime(time),
+            tickX,
+            padding.top + plotHeight + 8,
+          );
+        }
+
+        const points = [...samples.entries()]
+          .sort(([first], [second]) => first - second)
+          .map(([time, level]) => ({ time, ...level }));
+        if (points.length === 0) return;
+
+        chartContext.strokeStyle = '#22d3ee';
+        chartContext.lineWidth = 3;
+        chartContext.lineJoin = 'round';
+        chartContext.beginPath();
+        chartContext.moveTo(x(points[0].time), y(points[0].bitrate));
+        points.slice(1).forEach((point) => {
+          chartContext.lineTo(x(point.time), y(point.bitrate));
+        });
+        if (activeLevel) {
+          chartContext.lineTo(
+            x(Math.min(video.currentTime, duration)),
+            y(activeLevel.bitrate),
+          );
+        }
+        chartContext.stroke();
+      };
+
+      const sampleActiveLevel = () => {
+        if (!activeLevel || !Number.isFinite(video.currentTime)) return;
+        samples.set(Math.floor(video.currentTime), activeLevel);
+        drawChart();
+      };
+
+      const truncateSamplesAtSeekPosition = () => {
+        if (!Number.isFinite(video.currentTime)) return;
+        const seekSecond = Math.floor(video.currentTime);
+        for (const sampleTime of samples.keys()) {
+          if (sampleTime >= seekSecond) {
+            samples.delete(sampleTime);
+          }
+        }
+        if (activeLevel) {
+          samples.set(seekSecond, activeLevel);
+        }
+        drawChart();
+      };
+
+      const updateBufferDepth = () => {
+        let bufferedAhead = 0;
+        for (let index = 0; index < video.buffered.length; index += 1) {
+          if (
+            video.buffered.start(index) <= video.currentTime
+            && video.buffered.end(index) >= video.currentTime
+          ) {
+            bufferedAhead = video.buffered.end(index) - video.currentTime;
+            break;
+          }
+        }
+        bufferDepth.textContent = `Buffer: ${bufferedAhead.toFixed(1)}s`;
+      };
+
+      const createPlayer = (qualityOptions, onQualityChange) => new Plyr(video, {
+        controls: [
+          'play-large',
+          'play',
+          'progress',
+          'current-time',
+          'mute',
+          'volume',
+          'settings',
+          'pip',
+          'fullscreen',
+        ],
+        settings: ['quality', 'speed'],
+        iconUrl: 'https://cdn.jsdelivr.net/npm/plyr@3.8.4/dist/plyr.svg',
+        i18n: {
+          quality: 'Quality',
+          speed: 'Speed',
+          normal: 'Normal',
+          qualityLabel: { 0: 'Auto' },
+        },
+        quality: {
+          default: 0,
+          options: qualityOptions,
+          forced: true,
+          onChange: onQualityChange,
+        },
+      });
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: false,
+          maxBufferLength: 12,
+          maxMaxBufferLength: 12,
+          backBufferLength: 0,
+          abrEwmaFastVoD: 1,
+          abrEwmaSlowVoD: 3,
+          maxStarvationDelay: 2,
+          maxLoadingDelay: 2,
+        });
+        hls.loadSource(source);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+          levels = data.levels;
+          const heights = [...new Set(
+            data.levels.map((level) => level.height).filter(Boolean)
+          )].sort((a, b) => b - a);
+          createPlayer([0, ...heights], (height) => {
+            hls.currentLevel = height === 0
+              ? -1
+              : hls.levels.findIndex((level) => level.height === height);
+            abrMode.textContent = height === 0 ? 'ABR Auto' : `Fixed ${height}p`;
+            abrMode.classList.toggle('badge-auto', height === 0);
+          });
+          setStatus(`Ready: ${data.levels.length} renditions (Auto)`);
+          drawChart();
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+          const level = hls.levels[data.level];
+          if (level) {
+            activeLevel = level;
+            sampleActiveLevel();
+            currentRendition.textContent =
+              `${level.height}p / ${Math.round(level.bitrate / 1000)} kbps`;
+            setStatus(
+              `Playing: ${level.height}p / ${Math.round(level.bitrate / 1000)} kbps`
+            );
+          }
+        });
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            setStatus('Network error. Retrying...');
+            hls.startLoad();
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            setStatus('Media error. Recovering...');
+            hls.recoverMediaError();
+          } else {
+            setStatus(`Playback failed: ${data.details}`);
+            hls.destroy();
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = source;
+        createPlayer([0], () => {});
+        setStatus('Ready: native HLS (Auto)');
+        abrMode.textContent = 'Native HLS Auto';
+        currentRendition.textContent = 'Rendition data unavailable';
+      } else {
+        setStatus('This browser does not support HLS playback.');
+        abrMode.textContent = 'HLS unavailable';
+      }
+
+      video.addEventListener('timeupdate', sampleActiveLevel);
+      video.addEventListener('timeupdate', updateBufferDepth);
+      video.addEventListener('progress', updateBufferDepth);
+      video.addEventListener('seeking', truncateSamplesAtSeekPosition);
+      video.addEventListener('durationchange', drawChart);
+      window.addEventListener('resize', drawChart);
+      drawChart();
+    })();
+  </script>
+</body>
+</html>
